@@ -1,0 +1,487 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'BTG Pactual - Complete Infrastructure (VPC + DocumentDB + EC2)'
+
+Parameters:
+  # EC2 Parameters
+  KeyPairName:
+    Description: EC2 Key Pair name (create manually first)
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be an existing EC2 KeyPair
+  
+  SSHLocation:
+    Description: IP address range for SSH access (your IP/32 or 0.0.0.0/0)
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+
+  # DocumentDB Parameters
+  DBUsername:
+    Description: DocumentDB master username
+    Type: String
+    Default: btgadmin
+    MinLength: 1
+    MaxLength: 63
+    AllowedPattern: ^[a-zA-Z][a-zA-Z0-9]*$
+  
+  DBPassword:
+    Description: DocumentDB master password (min 8 characters)
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 100
+    Default: BTGPactual2025!
+  
+  # AWS SES Parameter (manual - must be verified before)
+  SESFromEmail:
+    Description: Verified email in SES (verify manually in SES console first)
+    Type: String
+    Default: your-email@gmail.com
+
+Resources:
+  # =====================================
+  # VPC and Networking
+  # =====================================
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+        - Key: Project
+          Value: BTGPactual
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+        - Key: Project
+          Value: BTGPactual
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (for EC2 with public IP)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet-1'
+        - Key: Type
+          Value: Public
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet-2'
+        - Key: Type
+          Value: Public
+
+  # Private Subnets (for DocumentDB)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.10.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-1'
+        - Key: Type
+          Value: Private
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-2'
+        - Key: Type
+          Value: Private
+
+  # Route Table for Public Subnets
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # =====================================
+  # Security Groups
+  # =====================================
+  
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-ec2-sg'
+      GroupDescription: Security group for EC2 instance running API
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # SSH access
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+          Description: SSH access
+        # HTTP
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP access
+        # API port
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+          Description: API access
+      SecurityGroupEgress:
+        # Allow all outbound
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2-sg'
+
+  DocumentDBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-docdb-sg'
+      GroupDescription: Security group for DocumentDB cluster
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        # Allow from EC2 only
+        - IpProtocol: tcp
+          FromPort: 27017
+          ToPort: 27017
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+          Description: Allow MongoDB connections from EC2
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-docdb-sg'
+
+  # =====================================
+  # DocumentDB
+  # =====================================
+  
+  DocumentDBSubnetGroup:
+    Type: AWS::DocDB::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub '${AWS::StackName}-docdb-subnet-group'
+      DBSubnetGroupDescription: Subnet group for DocumentDB cluster
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-docdb-subnet-group'
+
+  DocumentDBCluster:
+    Type: AWS::DocDB::DBCluster
+    DeletionPolicy: Delete
+    Properties:
+      DBClusterIdentifier: !Sub '${AWS::StackName}-docdb'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      EngineVersion: '5.0.0'
+      Port: 27017
+      DBSubnetGroupName: !Ref DocumentDBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DocumentDBSecurityGroup
+      BackupRetentionPeriod: 1
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'mon:04:00-mon:05:00'
+      StorageEncrypted: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-docdb-cluster'
+        - Key: Project
+          Value: BTGPactual
+
+  DocumentDBInstance:
+    Type: AWS::DocDB::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref DocumentDBCluster
+      DBInstanceIdentifier: !Sub '${AWS::StackName}-docdb-instance'
+      DBInstanceClass: db.t3.medium
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-docdb-instance'
+        - Key: Project
+          Value: BTGPactual
+
+  # =====================================
+  # IAM Role for EC2
+  # =====================================
+  
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-ec2-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonSESFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2-role'
+        - Key: Project
+          Value: BTGPactual
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${AWS::StackName}-ec2-profile'
+      Roles:
+        - !Ref EC2Role
+
+  # =====================================
+  # EC2 Instance
+  # =====================================
+  
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: DocumentDBInstance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+      InstanceType: t3.micro
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref EC2SecurityGroup
+          SubnetId: !Ref PublicSubnet1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          
+          # Log all output
+          exec > >(tee /var/log/user-data.log)
+          exec 2>&1
+          
+          echo "=========================================="
+          echo "BTG Pactual EC2 Setup - Starting"
+          echo "=========================================="
+          
+          # Update system
+          echo "Updating system packages..."
+          yum update -y
+          
+          # Install Docker
+          echo "Installing Docker..."
+          yum install -y docker
+          systemctl start docker
+          systemctl enable docker
+          usermod -a -G docker ec2-user
+          
+          # Install Docker Compose
+          echo "Installing Docker Compose..."
+          curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          
+          # Install Git
+          echo "Installing Git..."
+          yum install -y git
+          
+          # Create app directory
+          echo "Creating application directory..."
+          mkdir -p /home/ec2-user/app
+          cd /home/ec2-user/app
+          
+          # Download DocumentDB certificate
+          echo "Downloading DocumentDB TLS certificate..."
+          wget https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+          
+          # Create .env file with configuration
+          echo "Creating environment configuration..."
+          cat > .env << 'EOF'
+          ASPNETCORE_ENVIRONMENT=Production
+          UseRealAwsServices=true
+          MongoDbSettings__ConnectionString=mongodb://${DBUsername}:${DBPassword}@${DocumentDBCluster.Endpoint}:${DocumentDBCluster.Port}/?tls=true&tlsInsecure=true&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false
+          MongoDbSettings__DatabaseName=BTGPactualDB
+          AwsSettings__Region=${AWS::Region}
+          AwsSettings__Ses__FromEmail=${SESFromEmail}
+          AwsSettings__Ses__FromName=BTG Pactual
+          EOF
+          
+          # Create docker-compose.yml
+          echo "Creating docker-compose.yml template..."
+          cat > docker-compose.yml << 'EOFCOMPOSE'
+          version: '3.8'
+          services:
+            api:
+              image: btgpactual-api:latest
+              container_name: btgpactual-api
+              ports:
+                - "8080:8080"
+              env_file:
+                - .env
+              restart: unless-stopped
+              volumes:
+                - ./global-bundle.pem:/app/global-bundle.pem:ro
+          EOFCOMPOSE
+          
+          # Set proper permissions
+          chown -R ec2-user:ec2-user /home/ec2-user/app
+          chmod 600 /home/ec2-user/app/.env
+          
+          # Create setup info file
+          cat > /home/ec2-user/SETUP-INFO.txt << EOFINFO
+          ========================================
+          BTG Pactual Infrastructure - Setup Complete
+          ========================================
+          
+          DocumentDB Endpoint: ${DocumentDBCluster.Endpoint}
+          DocumentDB Port: ${DocumentDBCluster.Port}
+          Database Name: BTGPactualDB
+          
+          Application Directory: /home/ec2-user/app
+          
+          Next Steps:
+          1. SSH to this instance
+          2. Upload your Docker image or clone from Git
+          3. Run: docker-compose up -d
+          4. Access API at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):8080
+          
+          Configuration file: /home/ec2-user/app/.env
+          ========================================
+          EOFINFO
+          
+          chown ec2-user:ec2-user /home/ec2-user/SETUP-INFO.txt
+          
+          echo "=========================================="
+          echo "BTG Pactual EC2 Setup - Complete!"
+          echo "=========================================="
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-api-server'
+        - Key: Project
+          Value: BTGPactual
+
+# =====================================
+# Outputs
+# =====================================
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  PublicSubnet1Id:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnet1-ID'
+
+  PublicSubnet2Id:
+    Description: Public Subnet 2 ID
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnet2-ID'
+
+  DocumentDBEndpoint:
+    Description: DocumentDB Cluster Endpoint
+    Value: !GetAtt DocumentDBCluster.Endpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-DocumentDB-Endpoint'
+  
+  DocumentDBPort:
+    Description: DocumentDB Port
+    Value: !GetAtt DocumentDBCluster.Port
+    Export:
+      Name: !Sub '${AWS::StackName}-DocumentDB-Port'
+
+  DocumentDBConnectionString:
+    Description: DocumentDB Connection String (password hidden)
+    Value: !Sub 'mongodb://${DBUsername}:***@${DocumentDBCluster.Endpoint}:${DocumentDBCluster.Port}/?tls=true&tlsInsecure=true&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false'
+
+  EC2PublicIP:
+    Description: EC2 Instance Public IP Address
+    Value: !GetAtt EC2Instance.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-EC2-PublicIP'
+
+  EC2PublicDNS:
+    Description: EC2 Instance Public DNS Name
+    Value: !GetAtt EC2Instance.PublicDnsName
+    Export:
+      Name: !Sub '${AWS::StackName}-EC2-PublicDNS'
+
+  SSHCommand:
+    Description: SSH command to connect to EC2 instance
+    Value: !Sub 'ssh -i ${KeyPairName}.pem ec2-user@${EC2Instance.PublicIp}'
+
+  APIEndpoint:
+    Description: API Endpoint URL
+    Value: !Sub 'http://${EC2Instance.PublicIp}:8080'
+    Export:
+      Name: !Sub '${AWS::StackName}-API-Endpoint'
+
+  SwaggerUI:
+    Description: Swagger UI URL
+    Value: !Sub 'http://${EC2Instance.PublicIp}:8080/swagger'
+
+  SetupInstructions:
+    Description: Instructions for deploying the application
+    Value: !Sub |
+      1. SSH: ssh -i ${KeyPairName}.pem ec2-user@${EC2Instance.PublicIp}
+      2. Check setup: cat ~/SETUP-INFO.txt
+      3. Deploy application in ~/app directory
+      4. Start: docker-compose up -d
