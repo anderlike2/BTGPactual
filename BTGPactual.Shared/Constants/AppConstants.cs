@@ -5,8 +5,8 @@ public static class AppConstants
     public static class DefaultValues
     {
         public const decimal InitialBalance = 500000m;
-        public const string AdminEmail = "admin@btgpactual.com";
-        public const string AdminPassword = "Admin123!";
+        public const string AdminEmail = "anderlike4@gmail.com";
+        public const string AdminPassword = "Admin1980*.";
     }
 
     public static class ErrorMessages
